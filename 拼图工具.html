@@ -151,6 +151,11 @@
   .btn.ghost{background:#fff;border:1px solid var(--line);color:#4a5159;margin-top:8px}
   .btn.ghost:hover{border-color:#bcc6f0;color:var(--text)}
   .hint{font-size:11px;color:var(--sub);text-align:center;margin-top:8px;line-height:1.5}
+  #customWrap{display:none;margin-top:8px;align-items:center;gap:6px}
+  #customNum{width:84px;padding:7px 8px;border:1px solid var(--line);border-radius:8px;font-size:13px}
+  #customUnit{padding:7px 6px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#fff}
+  .toast{position:fixed;left:50%;bottom:32px;transform:translateX(-50%) translateY(16px);background:#1f2329;color:#fff;padding:11px 20px;border-radius:10px;font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,.22);opacity:0;transition:.28s;pointer-events:none;z-index:99;max-width:90vw;text-align:center}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
   @media (max-width:1100px){
     .col-left{flex-basis:240px}.col-right{flex-basis:270px}
@@ -285,6 +290,23 @@
           <button data-w="3000">超清</button>
         </div>
       </div>
+
+      <div class="ctrl">
+        <label>文件大小 <span class="v" id="targetV">不限制</span></label>
+        <div class="seg" id="targetSeg">
+          <button data-kb="0" class="on">不限制</button>
+          <button data-kb="500">≤500K</button>
+          <button data-kb="1024">≤1M</button>
+          <button data-kb="2048">≤2M</button>
+          <button data-kb="5120">≤5M</button>
+          <button data-kb="custom">自定义</button>
+        </div>
+        <div id="customWrap">
+          <input type="number" id="customNum" min="50" step="50" value="800">
+          <select id="customUnit"><option value="kb">KB</option><option value="mb">MB</option></select>
+          <span style="font-size:12px;color:var(--sub)">目标体积（按 JPG 压缩）</span>
+        </div>
+      </div>
     </div>
 
     <div class="foot">
@@ -356,6 +378,7 @@ const state = {
   gap: 6, pad: 0, rad: 0,
   bg: "#ffffff",
   outW: 2000,
+  targetKB: 0,         // 0=不限制；>0 时导出自动压缩到该体积内
 };
 const MAXDIM = 6500;     // 画布单边像素上限，防止内存爆掉
 
@@ -446,7 +469,7 @@ function renderThumbs(){
   $("#emptyList").style.display=has?"none":"";
   $("#clearBtn").style.display=has?"":"none";
   $("#countTag").textContent=has?`共 ${state.images.length} 张`:"";
-  $("#exportBtn").disabled=$("#exportJpg").disabled=!has;
+  refreshExportButtons();
 }
 
 /* ---------- 绘制 ---------- */
@@ -582,6 +605,67 @@ function download(blob,ext){
   a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 
+/* ---------- 指定文件大小：自动压缩导出 ---------- */
+function fmtKB(kb){return kb>=1024?(kb/1024).toFixed(kb%1024?1:0)+" MB":kb+" KB";}
+function fmtSize(b){return b>=1048576?(b/1048576).toFixed(2)+" MB":(b/1024).toFixed(0)+" KB";}
+function toBlobP(c,type,q){return new Promise((res,rej)=>c.toBlob(b=>b?res(b):rej(new Error("编码失败")),type,q));}
+function whiteBg(c){ // JPG 不支持透明，给透明背景补白底
+  if(state.bg!=="transparent")return;
+  const x=c.getContext("2d");x.setTransform(1,0,0,1,0,0);
+  x.globalCompositeOperation="destination-over";x.fillStyle="#fff";
+  x.fillRect(0,0,c.width,c.height);x.globalCompositeOperation="source-over";
+}
+// 二分质量 + 必要时降尺寸，把 JPG 压到目标体积内
+async function compressToTarget(target){
+  const type="image/jpeg"; let w=state.outW, fallback=null;
+  for(let pass=0;pass<7;pass++){
+    const c=document.createElement("canvas"); paint(c,Math.round(w)); whiteBg(c);
+    const hiBlob=await toBlobP(c,type,0.95);
+    if(hiBlob.size<=target) return {blob:hiBlob,q:0.95,w:c.width,h:c.height,ok:true};
+    const loBlob=await toBlobP(c,type,0.30);
+    fallback={blob:loBlob,q:0.30,w:c.width,h:c.height,ok:false};
+    if(loBlob.size<=target){
+      let lo=0.30,hi=0.95,bestB=loBlob,bestQ=0.30;
+      for(let i=0;i<8;i++){const mid=(lo+hi)/2;const b=await toBlobP(c,type,mid);
+        if(b.size<=target){bestB=b;bestQ=mid;lo=mid;}else{hi=mid;}}
+      return {blob:bestB,q:bestQ,w:c.width,h:c.height,ok:true};
+    }
+    w*=0.8; if(w<150)break;   // 最低质量仍超标 → 缩小尺寸再试
+  }
+  return fallback;            // 兜底：已压到最小
+}
+async function exportTargeted(){
+  if(!state.images.length)return;
+  const target=state.targetKB*1024, btn=$("#exportBtn");
+  btn.disabled=true; btn.textContent="压缩中…";
+  try{
+    const r=await compressToTarget(target);
+    download(r.blob,"jpg");
+    toast(`${r.ok?"✅ 已导出":"⚠️ 已尽力压缩"} ${fmtSize(r.blob.size)} · ${r.w}×${r.h} · 质量${Math.round(r.q*100)}%${r.ok?"":"（目标过小，已压到最小）"}`);
+  }catch(e){ toast("导出失败："+e.message); }
+  finally{ refreshExportButtons(); }
+}
+let _toastT;
+function toast(msg){
+  let el=document.getElementById("toast");
+  if(!el){el=document.createElement("div");el.id="toast";el.className="toast";document.body.appendChild(el);}
+  el.textContent=msg; el.classList.add("show");
+  clearTimeout(_toastT); _toastT=setTimeout(()=>el.classList.remove("show"),4200);
+}
+function refreshExportButtons(){
+  const has=state.images.length>0, t=state.targetKB>0;
+  const a=$("#exportBtn"), b=$("#exportJpg");
+  a.disabled=b.disabled=!has;
+  a.textContent = t? `导出（≤${fmtKB(state.targetKB)} · JPG）` : "导出拼图（PNG）";
+  b.textContent = t? "导出 PNG（原图）" : "导出为 JPG（更小）";
+}
+function updateCustomTarget(){
+  const n=+$("#customNum").value||0, unit=$("#customUnit").value;
+  state.targetKB = unit==="mb"? Math.round(n*1024) : Math.round(n);
+  $("#targetV").textContent = state.targetKB>0? "≤ "+fmtKB(state.targetKB) : "不限制";
+  refreshExportButtons();
+}
+
 /* ---------- 事件绑定 ---------- */
 function bind(){
   const drop=$("#drop"),file=$("#file");
@@ -622,8 +706,21 @@ function bind(){
   $("#bgColor").oninput=e=>{document.querySelectorAll(".sw").forEach(x=>x.classList.remove("on"));
     state.bg=e.target.value;render();};
 
-  $("#exportBtn").onclick=()=>exportImg("png");
-  $("#exportJpg").onclick=()=>exportImg("jpg");
+  // 文件大小目标
+  $("#targetSeg").onclick=e=>{const btn=e.target.closest("button");if(!btn)return;
+    document.querySelectorAll("#targetSeg button").forEach(x=>x.classList.remove("on"));btn.classList.add("on");
+    const v=btn.dataset.kb;
+    if(v==="custom"){ $("#customWrap").style.display="flex"; updateCustomTarget(); }
+    else { $("#customWrap").style.display="none"; state.targetKB=+v;
+      $("#targetV").textContent = state.targetKB>0? "≤ "+fmtKB(state.targetKB):"不限制";
+      refreshExportButtons(); }
+  };
+  $("#customNum").oninput=updateCustomTarget;
+  $("#customUnit").onchange=updateCustomTarget;
+
+  // 导出：有目标体积时主按钮走压缩(JPG)，副按钮导原图(PNG)
+  $("#exportBtn").onclick=()=> state.targetKB>0 ? exportTargeted() : exportImg("png");
+  $("#exportJpg").onclick=()=> state.targetKB>0 ? exportImg("png") : exportImg("jpg");
 }
 function seg(e,sel,fn){const b=e.target.closest("button");if(!b)return;
   document.querySelectorAll(sel+" button").forEach(x=>x.classList.remove("on"));b.classList.add("on");fn(b);render();}
