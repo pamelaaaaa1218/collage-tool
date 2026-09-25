@@ -73,4 +73,4 @@
 
 纯前端单文件：HTML + CSS + 原生 JavaScript + Canvas，零依赖、零构建。
 
-在线版接入 Google Analytics（`G-QK1S0Y1B4C`），与去水印工具共用统计账号，通过页面路径和 `tool_name=collage_tool` 区分。监测事件包括图片导入、模板选择、导出和公众号入口打开；照片内容始终只在浏览器本地处理。
+在线版使用独立的 Google Analytics 4 属性“拼图工具”和独立网页数据流（Measurement ID：`G-FF8CV5EVXB`），与去水印工具的数据完全分开。监测事件包括图片导入、模板选择、导出和公众号入口打开；照片内容始终只在浏览器本地处理。
